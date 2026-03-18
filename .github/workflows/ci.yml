@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CREUSOT_VERSION: v0.10.0
+  # Must match the nightly pinned by the Creusot release tag, not master.
+  # Check: git show v0.10.0:rust-toolchain in the creusot repo.
+  CREUSOT_NIGHTLY: nightly-2026-01-29
+
+jobs:
+  # ── Build, test, lint ────────────────────────────────────────────────
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check docs
+        run: cargo doc --no-deps
+
+  # ── Kani (bounded model checking) ───────────────────────────────────
+  kani:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Kani
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: --output-format terse
+
+  # ── Creusot (deductive verification — compile specs) ────────────────
+  creusot-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Creusot nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CREUSOT_NIGHTLY }}
+          components: rustfmt, rustc-dev, llvm-tools
+
+      - name: Cache Creusot binaries
+        id: cache-creusot
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-creusot
+            ~/.cargo/bin/creusot-rustc
+          key: creusot-${{ env.CREUSOT_VERSION }}-${{ env.CREUSOT_NIGHTLY }}
+
+      - name: Install Creusot
+        if: steps.cache-creusot.outputs.cache-hit != 'true'
+        run: |
+          cargo +$CREUSOT_NIGHTLY install --git https://github.com/creusot-rs/creusot --tag $CREUSOT_VERSION cargo-creusot
+          cargo +$CREUSOT_NIGHTLY install --git https://github.com/creusot-rs/creusot --tag $CREUSOT_VERSION creusot-rustc
+
+      - name: Creusot check (compile specs)
+        run: cargo creusot -- --lib
+
+  # ── Creusot prove (full SMT verification) ───────────────────────────
+  # Heavyweight: requires opam, Why3, why3find, and 4 SMT solvers.
+  # First run installs ~1.4GB of tools; subsequent runs are cached.
+  # Proving itself takes <1 second for this codebase.
+  creusot-prove:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Creusot nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CREUSOT_NIGHTLY }}
+          components: rustfmt, rustc-dev, llvm-tools
+
+      - name: Cache Creusot binaries
+        id: cache-creusot
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-creusot
+            ~/.cargo/bin/creusot-rustc
+          key: creusot-${{ env.CREUSOT_VERSION }}-${{ env.CREUSOT_NIGHTLY }}
+
+      - name: Install Creusot
+        if: steps.cache-creusot.outputs.cache-hit != 'true'
+        run: |
+          cargo +$CREUSOT_NIGHTLY install --git https://github.com/creusot-rs/creusot --tag $CREUSOT_VERSION cargo-creusot
+          cargo +$CREUSOT_NIGHTLY install --git https://github.com/creusot-rs/creusot --tag $CREUSOT_VERSION creusot-rustc
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y opam libzmq3-dev
+
+      - name: Cache opam switch (Why3, why3find, solvers)
+        id: cache-opam
+        uses: actions/cache@v5
+        with:
+          path: ~/.creusot
+          key: creusot-opam-${{ env.CREUSOT_VERSION }}-${{ runner.os }}
+
+      - name: Initialize opam and install Creusot solvers
+        if: steps.cache-opam.outputs.cache-hit != 'true'
+        run: |
+          opam init --bare --disable-sandboxing
+          cargo creusot setup install
+
+      - name: Configure opam environment
+        run: echo "$(opam env --switch=$HOME/.creusot --set-switch)" >> $GITHUB_ENV
+
+      - name: Creusot prove
+        run: cargo creusot prove -- --lib

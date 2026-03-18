@@ -1,0 +1,24 @@
+[package]
+name = "term-frequency"
+version = "0.1.0"
+edition = "2024"
+description = "Term-frequency pipeline with three verification layers (debug_assert, Kani, Creusot)"
+repository = "https://github.com/FranklinChen/exercises-in-programming-style-rust"
+license = "MIT"
+
+[dependencies]
+creusot-std = "0.10.0"
+rayon = "1.11"
+
+[lints.rust]
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+all = { level = "deny" }
+
+[dev-dependencies]
+
+[[bin]]
+name = "tf"
+path = "src/main.rs"
